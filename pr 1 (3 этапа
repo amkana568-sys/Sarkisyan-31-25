@@ -1,0 +1,765 @@
+1. .gitignore
+
+__pycache__/
+*.py[cod]
+.venv/
+build/
+*.log
+
+
+
+
+2. README.md
+
+# Эмулятор shell
+
+## Общее описание
+GUI-эмулятор командной оболочки. Реализованы этапы 1–3:
+- REPL с окном Tkinter;
+- заглушки `ls`, `cd`, команда `exit`;
+- парсер по пробелам;
+- обработка ошибок;
+- CLI-параметры и XML-конфигурация с приоритетом CLI;
+- стартовый скрипт с пропуском ошибочных строк;
+- загрузка VFS из ZIP-архива в память без распаковки на диск.
+
+## Функции и настройки
+Параметры командной строки:
+- `--vfs PATH` — путь к ZIP-архиву VFS;
+- `--prompt TEXT` — приглашение REPL;
+- `--script PATH` — стартовый скрипт;
+- `--config PATH` — XML-конфигурация.
+
+XML-конфигурация:
+```xml
+<config>
+    <vfs path="examples/vfs/vfs_many.zip"/>
+    <prompt>variant23&gt; </prompt>
+    <startup path="examples/startup/basic.txt"/>
+</config>
+
+
+
+
+python3 tools/make_examples.sh
+python3 -m src.main --vfs examples/vfs/vfs_many.zip --prompt "vfs23> " --script examples/startup/basic.txt            ----------- Сборка и запуск
+
+
+python3 -m src.main --config examples/config.xml ----------  Запуск с конфигом
+
+
+python3 -m unittest discover -s tests -v ---------  Запуск тестов
+
+
+
+Примеры использования
+ls — заглушка выводит имя и аргументы;
+
+cd /docs — заглушка выводит имя и аргументы;
+
+cd — ошибка: требуется ровно один аргумент;
+
+unknown — ошибка: неизвестная команда;
+
+exit — закрыть приложение.
+
+
+
+
+
+VFS
+VFS загружается из ZIP в память. Архив не распаковывается и не модифицируется.
+Бинарные данные хранятся в памяти как bytes.
+
+
+
+---
+
+## 3. `Makefile`
+
+```make
+.PHONY: run test examples
+
+run:
+	python3 -m src.main $(ARGS)
+
+test:
+	python3 -m unittest discover -s tests -v
+
+examples:
+	bash tools/make_examples.sh
+
+
+
+4. run.sh
+
+#!/usr/bin/env bash
+set -e
+exec python3 -m src.main "$@"
+
+
+5. run.bat
+
+@echo off
+python -m src.main %*
+
+
+6. src/__init__.py
+# package marker
+
+
+
+
+
+
+7. src/main.py
+
+from __future__ import annotations
+
+import sys
+import tkinter as tk
+from tkinter import messagebox
+
+from .config import ConfigError, load_config
+from .gui import EmulatorApp
+from .vfs import VFSError, load_vfs_zip
+
+
+def main(argv=None) -> int:
+    try:
+        cfg = load_config(argv)
+        vfs = load_vfs_zip(cfg.vfs_path)
+    except (ConfigError, VFSError) as e:
+        print(f"Ошибка запуска: {e}", file=sys.stderr)
+        try:
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showerror("Ошибка запуска", str(e))
+            root.destroy()
+        except Exception:
+            pass
+        return 1
+
+    root = tk.Tk()
+    EmulatorApp(root, cfg, vfs)
+    root.mainloop()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+
+
+
+
+
+
+8. src/config.py
+
+from __future__ import annotations
+
+import argparse
+import os
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass
+from typing import Any, Dict, Optional
+
+
+class ConfigError(Exception):
+    pass
+
+
+@dataclass
+class AppConfig:
+    vfs_path: Optional[str] = None
+    prompt: str = "vfs> "
+    startup_path: Optional[str] = None
+    config_path: Optional[str] = None
+
+
+def _xml_value(root: ET.Element, tag: str, attr: Optional[str] = None) -> Optional[str]:
+    el = root.find(tag)
+    if el is None:
+        return None
+    if attr:
+        value = el.get(attr)
+        if value is not None:
+            return value
+    text = (el.text or "").strip()
+    return text or None
+
+
+def _read_xml(path: str) -> Dict[str, Any]:
+    try:
+        tree = ET.parse(path)
+    except Exception as e:
+        raise ConfigError(f"Не удалось прочитать XML-конфигурацию '{path}': {e}") from e
+
+    root = tree.getroot()
+    data: Dict[str, Any] = {
+        "vfs_path": _xml_value(root, "vfs", "path"),
+        "prompt": _xml_value(root, "prompt"),
+        "startup_path": _xml_value(root, "startup", "path")
+        or _xml_value(root, "script", "path"),
+    }
+
+    # Поддержка варианта <config vfs="..." prompt="..." startup="...">
+    if not data.get("vfs_path") and root.get("vfs"):
+        data["vfs_path"] = root.get("vfs")
+    if not data.get("prompt") and root.get("prompt"):
+        data["prompt"] = root.get("prompt")
+    if not data.get("startup_path") and root.get("startup"):
+        data["startup_path"] = root.get("startup")
+
+    return {k: v for k, v in data.items() if v is not None}
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Эмулятор shell, вариант 23, этапы 1-3"
+    )
+    parser.add_argument("--vfs", dest="vfs_path", help="Путь к ZIP-архиву VFS")
+    parser.add_argument("--prompt", dest="prompt", help="Пользовательское приглашение REPL")
+    parser.add_argument("--script", dest="startup_path", help="Путь к стартовому скрипту")
+    parser.add_argument("--config", dest="config_path", help="Путь к XML-конфигурации")
+    return parser.parse_args(argv)
+
+
+def load_config(argv=None) -> AppConfig:
+    args = parse_args(argv)
+    file_data = _read_xml(args.config_path) if args.config_path else {}
+
+    cfg = AppConfig(config_path=args.config_path)
+
+    # Приоритет: командная строка > XML-файл > значение по умолчанию.
+    cfg.vfs_path = args.vfs_path if args.vfs_path is not None else file_data.get("vfs_path")
+    cfg.prompt = args.prompt if args.prompt is not None else file_data.get("prompt", "vfs> ")
+    cfg.startup_path = (
+        args.startup_path
+        if args.startup_path is not None
+        else file_data.get("startup_path")
+    )
+
+    if not cfg.prompt:
+        cfg.prompt = "vfs> "
+
+    return cfg
+
+
+def config_debug(cfg: AppConfig) -> str:
+    lines = [
+        "=== Параметры эмулятора ===",
+        f"config_path = {cfg.config_path!r}",
+        f"vfs_path    = {cfg.vfs_path!r}",
+        f"prompt      = {cfg.prompt!r}",
+        f"startup     = {cfg.startup_path!r}",
+    ]
+    if cfg.vfs_path:
+        lines.append(f"vfs_abs     = {os.path.abspath(cfg.vfs_path)!r}")
+    if cfg.startup_path:
+        lines.append(f"startup_abs = {os.path.abspath(cfg.startup_path)!r}")
+    return "\n".join(lines)
+
+
+
+
+
+
+
+
+
+
+
+
+9. src/vfs.py
+
+
+
+from __future__ import annotations
+
+import os
+import zipfile
+from dataclasses import dataclass, field
+from typing import Dict, Optional
+
+
+class VFSError(Exception):
+    pass
+
+
+@dataclass
+class Node:
+    name: str
+    is_dir: bool
+    data: bytes = b""
+    children: Dict[str, "Node"] = field(default_factory=dict)
+
+
+class VFS:
+    def __init__(self, name: str, root: Node):
+        self.name = name
+        self.root = root
+
+
+def default_vfs(name: str = "default") -> VFS:
+    root = Node("/", True)
+    root.children["readme.txt"] = Node(
+        "readme.txt", False, b"Default in-memory VFS\n"
+    )
+    return VFS(name, root)
+
+
+def load_vfs_zip(path: Optional[str]) -> VFS:
+    if not path:
+        return default_vfs()
+
+    if not os.path.exists(path):
+        raise VFSError(f"VFS ZIP не найден: {path}")
+
+    if not zipfile.is_zipfile(path):
+        raise VFSError(f"VFS не является ZIP-архивом: {path}")
+
+    root = Node("/", True)
+
+    try:
+        with zipfile.ZipFile(path, "r") as zf:
+            for info in zf.infolist():
+                parts = [p for p in info.filename.replace("\\", "/").split("/") if p]
+                if not parts:
+                    continue
+
+                current = root
+                for part in parts[:-1]:
+                    if part not in current.children:
+                        current.children[part] = Node(part, True)
+                    current = current.children[part]
+                    if not current.is_dir:
+                        raise VFSError(
+                            f"Конфликт файла и папки в VFS: {info.filename}"
+                        )
+
+                last = parts[-1]
+                if info.is_dir():
+                    if last not in current.children:
+                        current.children[last] = Node(last, True)
+                else:
+                    # Бинарные данные храним в памяти как bytes.
+                    current.children[last] = Node(last, False, zf.read(info))
+    except zipfile.BadZipFile as e:
+        raise VFSError(f"Ошибка чтения ZIP-архива: {e}") from e
+
+    return VFS(os.path.basename(path), root)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+10. src/shell.py
+
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import List
+
+from .vfs import VFS
+
+
+@dataclass
+class CommandResult:
+    output: str = ""
+    ok: bool = True
+    exit_requested: bool = False
+
+
+class Shell:
+    def __init__(self, vfs: VFS, prompt: str = "vfs> "):
+        self.vfs = vfs
+        self.prompt = prompt
+        self.history: List[str] = []
+
+    def execute(self, line: str) -> CommandResult:
+        line = line.strip()
+        if not line:
+            return CommandResult()
+
+        self.history.append(line)
+
+        # Простой парсер: разделение ввода на команду и аргументы по пробелам.
+        parts = line.split()
+        cmd, args = parts[0], parts[1:]
+
+        if cmd == "exit":
+            if args:
+                return CommandResult("Ошибка: exit: неверные аргументы", ok=False)
+            return CommandResult(exit_requested=True)
+
+        if cmd == "ls":
+            # Заглушка этапа 1-3.
+            return CommandResult(f"ls: args={args!r}")
+
+        if cmd == "cd":
+            # Заглушка этапа 1-3, но с проверкой аргументов.
+            if len(args) != 1:
+                return CommandResult(
+                    "Ошибка: cd: требуется ровно один аргумент",
+                    ok=False,
+                )
+            return CommandResult(f"cd: args={args!r}")
+
+        return CommandResult(f"Ошибка: неизвестная команда: {cmd}", ok=False)
+
+
+
+
+
+
+
+11. src/gui.py
+
+from __future__ import annotations
+
+import tkinter as tk
+from tkinter import scrolledtext
+
+from .config import AppConfig, config_debug
+from .shell import Shell
+from .vfs import VFS
+
+
+class EmulatorApp:
+    def __init__(self, root: tk.Tk, cfg: AppConfig, vfs: VFS):
+        self.root = root
+        self.cfg = cfg
+        self.vfs = vfs
+        self.shell = Shell(vfs, cfg.prompt)
+
+        # Заголовок окна содержит имя VFS.
+        root.title(f"Эмулятор — {vfs.name}")
+        root.geometry("900x600")
+
+        self.output = scrolledtext.ScrolledText(root, wrap=tk.WORD)
+        self.output.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+
+        bottom = tk.Frame(root)
+        bottom.pack(fill=tk.X, padx=8, pady=(0, 8))
+
+        # Пользовательское приглашение отображается в REPL.
+        self.prompt_label = tk.Label(bottom, text=cfg.prompt)
+        self.prompt_label.pack(side=tk.LEFT)
+
+        self.entry = tk.Entry(bottom)
+        self.entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.entry.bind("<Return>", self.on_enter)
+        self.entry.focus_set()
+
+        # Отладочный вывод всех параметров при запуске.
+        self.append(config_debug(cfg))
+        self.append(f"VFS загружена: {vfs.name}")
+
+        self.run_startup_script()
+
+    def append(self, text: str) -> None:
+        self.output.insert(tk.END, text + "\n")
+        self.output.see(tk.END)
+
+    def on_enter(self, event=None) -> None:
+        line = self.entry.get()
+        self.entry.delete(0, tk.END)
+
+        self.append(f"{self.cfg.prompt}{line}")
+        result = self.shell.execute(line)
+
+        if result.output:
+            self.append(result.output)
+
+        if result.exit_requested:
+            self.root.after(50, self.root.destroy)
+
+    def run_startup_script(self) -> None:
+        if not self.cfg.startup_path:
+            return
+
+        self.append(f"=== Стартовый скрипт: {self.cfg.startup_path} ===")
+
+        try:
+            with open(self.cfg.startup_path, "r", encoding="utf-8") as f:
+                lines = f.read().splitlines()
+        except OSError as e:
+            self.append(
+                f"[script error] не удалось прочитать стартовый скрипт: {e}"
+            )
+            return
+
+        for number, raw in enumerate(lines, start=1):
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+
+            self.append(f"{self.cfg.prompt}{line}")
+            result = self.shell.execute(line)
+
+            if result.output:
+                self.append(result.output)
+
+            # Ошибочные строки пропускаем, но сообщаем об ошибке.
+            if not result.ok:
+                self.append(
+                    f"[script error] строка {number}: команда завершилась с ошибкой"
+                )
+
+            if result.exit_requested:
+                self.root.after(50, self.root.destroy)
+                break
+
+
+
+
+
+
+
+
+12. tests/test_shell.py
+
+
+
+import unittest
+
+from src.shell import Shell
+from src.vfs import default_vfs
+
+
+class TestShell(unittest.TestCase):
+    def setUp(self):
+        self.shell = Shell(default_vfs("test"))
+
+    def test_ls_stub(self):
+        result = self.shell.execute("ls -la")
+        self.assertTrue(result.ok)
+        self.assertIn("ls", result.output)
+        self.assertIn("-la", result.output)
+
+    def test_cd_requires_one_arg(self):
+        result = self.shell.execute("cd")
+        self.assertFalse(result.ok)
+        self.assertIn("cd", result.output)
+
+    def test_unknown_command(self):
+        result = self.shell.execute("unknown")
+        self.assertFalse(result.ok)
+        self.assertIn("неизвестная", result.output)
+
+    def test_exit(self):
+        result = self.shell.execute("exit")
+        self.assertTrue(result.exit_requested)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+
+
+
+
+
+
+
+13. tests/test_config.py
+
+import os
+import tempfile
+import unittest
+
+from src.config import load_config
+
+
+class TestConfig(unittest.TestCase):
+    def test_cli_priority_over_xml(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg_path = os.path.join(d, "cfg.xml")
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                f.write(
+                    "<config>"
+                    "<vfs path='from_xml.zip'/>"
+                    "<prompt>xml&gt; </prompt>"
+                    "<startup path='xml.txt'/>"
+                    "</config>"
+                )
+
+            cfg = load_config([
+                "--config", cfg_path,
+                "--vfs", "cli.zip",
+                "--prompt", "cli> ",
+            ])
+
+            self.assertEqual(cfg.vfs_path, "cli.zip")
+            self.assertEqual(cfg.prompt, "cli> ")
+            self.assertEqual(cfg.startup_path, "xml.txt")
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+
+
+14. tests/test_vfs.py
+
+
+
+import os
+import tempfile
+import unittest
+import zipfile
+
+from src.vfs import VFSError, load_vfs_zip
+
+
+class TestVFS(unittest.TestCase):
+    def test_load_zip(self):
+        with tempfile.TemporaryDirectory() as d:
+            zip_path = os.path.join(d, "vfs.zip")
+            with zipfile.ZipFile(zip_path, "w") as zf:
+                zf.writestr("readme.txt", "hello")
+                zf.writestr("docs/a.txt", "a")
+
+            vfs = load_vfs_zip(zip_path)
+            self.assertIn("readme.txt", vfs.root.children)
+            self.assertIn("docs", vfs.root.children)
+            self.assertTrue(vfs.root.children["docs"].is_dir)
+
+    def test_invalid_zip(self):
+        with tempfile.TemporaryDirectory() as d:
+            bad = os.path.join(d, "bad.zip")
+            with open(bad, "w", encoding="utf-8") as f:
+                f.write("not a zip")
+            with self.assertRaises(VFSError):
+                load_vfs_zip(bad)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+
+
+
+
+15. examples/config.xml
+
+
+<?xml version="1.0" encoding="UTF-8"?>
+<config>
+    <vfs path="examples/vfs/vfs_many.zip"/>
+    <prompt>variant23&gt; </prompt>
+    <startup path="examples/startup/basic.txt"/>
+</config>
+
+
+
+
+
+
+16. examples/startup/basic.txt
+
+
+# Стартовый скрипт этапа 2.
+# Ошибочные строки пропускаются, выводятся сообщения об ошибках.
+ls
+cd /docs
+cd
+unknown-command
+
+
+
+
+17. examples/startup/vfs_test.txt
+
+
+# Стартовый скрипт этапа 3: проверка загрузки VFS и ошибок.
+ls
+cd /a/b/c
+cd
+bad-command
+
+
+
+
+
+18. examples/scripts/run_min.sh
+
+#!/usr/bin/env bash
+set -e
+python3 -m src.main \
+  --vfs examples/vfs/vfs_min.zip \
+  --prompt "min> " \
+  --script examples/startup/basic.txt
+
+
+
+
+19. examples/scripts/run_many.sh
+
+
+#!/usr/bin/env bash
+set -e
+python3 -m src.main \
+  --vfs examples/vfs/vfs_many.zip \
+  --prompt "many> " \
+  --script examples/startup/vfs_test.txt
+
+
+
+20. examples/scripts/run_config.sh
+
+#!/usr/bin/env bash
+set -e
+python3 -m src.main \
+  --config examples/config.xml \
+  --prompt "cli-override> "
+
+
+
+21. tools/make_examples.sh
+
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+BUILD="$ROOT/build"
+VFS="$ROOT/examples/vfs"
+
+mkdir -p "$BUILD" "$VFS"
+
+rm -rf "$BUILD/vfs_min" "$BUILD/vfs_many" "$BUILD/vfs_deep"
+
+# Минимальная VFS.
+mkdir -p "$BUILD/vfs_min"
+echo "minimal vfs" > "$BUILD/vfs_min/readme.txt"
+(cd "$BUILD/vfs_min" && zip -qr "$VFS/vfs_min.zip" .)
+
+# Несколько файлов.
+mkdir -p "$BUILD/vfs_many/docs"
+echo "hello" > "$BUILD/vfs_many/readme.txt"
+echo "doc1" > "$BUILD/vfs_many/docs/a.txt"
+echo "doc2" > "$BUILD/vfs_many/docs/b.txt"
+(cd "$BUILD/vfs_many" && zip -qr "$VFS/vfs_many.zip" .)
+
+# Не менее 3 уровней папок.
+mkdir -p "$BUILD/vfs_deep/a/b/c"
+echo "deep" > "$BUILD/vfs_deep/a/b/c/file.txt"
+echo "root" > "$BUILD/vfs_deep/root.txt"
+(cd "$BUILD/vfs_deep" && zip -qr "$VFS/vfs_deep.zip" .)
+
+echo "OK: созданы $VFS/vfs_min.zip, $VFS/vfs_many.zip, $VFS/vfs_deep.zip"
