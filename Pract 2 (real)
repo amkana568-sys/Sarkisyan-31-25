@@ -1,0 +1,374 @@
+### .gitignore
+```
+build/
+*.o
+*.exe
+graph.puml
+.vscode/
+```
+
+### CMakeLists.txt
+```
+cmake_minimum_required(VERSION 3.12)
+project(dep_visualizer)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+add_executable(visualizer src/main.cpp)
+add_executable(test_runner tests/test_graph.cpp)
+```
+
+### config.toml
+```
+package = "A"
+repo_url = "http://dl-cdn.alpinelinux.org/alpine/v3.19/main/x86_64/APKINDEX.tar.gz"
+test_mode = true
+test_file = "test_repo.txt"
+ascii_tree = true
+max_depth = 3
+filter_substr = ""
+```
+
+### test_repo.txt
+```
+A: B C
+B: D E
+C: E
+D: F
+E: F
+F:
+X: Y Z
+Y: Z
+Z:
+P: Q
+Q: R
+R: P
+```
+
+### run.sh
+```
+#!/bin/bash
+mkdir -p build
+cd build
+cmake ..
+make
+cd ..
+./build/visualizer
+```
+
+### src/main.cpp
+```
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <vector>
+#include <map>
+#include <stack>
+#include <cstdio>
+#include <cstdlib>
+
+using namespace std;
+
+struct Config {
+    string package;
+    string repo_url;
+    bool test_mode;
+    string test_file;
+    bool ascii_tree;
+    int max_depth;
+    string filter_substr;
+};
+
+string trim(const string& str) {
+    size_t first = str.find_first_not_of(" \t\"\r\n");
+    if (string::npos == first) return "";
+    size_t last = str.find_last_not_of(" \t\"\r\n");
+    return str.substr(first, (last - first + 1));
+}
+
+Config loadConfig(const string& filename) {
+    Config cfg;
+    ifstream file(filename);
+    string line;
+    if (!file.is_open()) {
+        cerr << "Error: Cannot open " << filename << endl;
+        exit(1);
+    }
+    while (getline(file, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        size_t pos = line.find('=');
+        if (pos != string::npos) {
+            string key = trim(line.substr(0, pos));
+            string val = trim(line.substr(pos + 1));
+            try {
+                if (key == "package") cfg.package = val;
+                else if (key == "repo_url") cfg.repo_url = val;
+                else if (key == "test_mode") cfg.test_mode = (val == "true");
+                else if (key == "test_file") cfg.test_file = val;
+                else if (key == "ascii_tree") cfg.ascii_tree = (val == "true");
+                else if (key == "max_depth") cfg.max_depth = stoi(val);
+                else if (key == "filter_substr") cfg.filter_substr = val;
+            } catch (...) {
+                cerr << "Error parsing key: " << key << endl;
+                exit(1);
+            }
+        }
+    }
+    return cfg;
+}
+
+map<string, vector<string>> loadTestRepo(const string& filename) {
+    map<string, vector<string>> index;
+    ifstream file(filename);
+    string line;
+    if (!file.is_open()) {
+        cerr << "Error: Cannot open test file " << filename << endl;
+        exit(1);
+    }
+    while (getline(file, line)) {
+        size_t colon = line.find(':');
+        if (colon != string::npos) {
+            string pkg = trim(line.substr(0, colon));
+            stringstream ss(line.substr(colon + 1));
+            string dep;
+            while (ss >> dep) index[pkg].push_back(dep);
+        }
+    }
+    return index;
+}
+
+map<string, vector<string>> loadRealRepo(const string& url) {
+    map<string, vector<string>> index;
+    string cmd = "curl -s " + url + " | tar -xzO APKINDEX 2>/dev/null";
+    FILE* pipe = popen(cmd.c_str(), "r");
+    if (!pipe) {
+        cerr << "Failed to run curl/tar" << endl;
+        return index;
+    }
+    
+    char buffer[512];
+    string currentPkg = "";
+    while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+        string line(buffer);
+        if (line.rfind("P:", 0) == 0) {
+            currentPkg = trim(line.substr(2));
+            index[currentPkg] = {};
+        } else if (line.rfind("D:", 0) == 0 && !currentPkg.empty()) {
+            stringstream ss(line.substr(2));
+            string dep;
+            while (ss >> dep) {
+                size_t eq = dep.find('=');
+                if (eq != string::npos) dep = dep.substr(0, eq);
+                index[currentPkg].push_back(dep);
+            }
+        }
+    }
+    pclose(pipe);
+    return index;
+}
+
+map<string, vector<string>> dfsIterative(string start, const map<string, vector<string>>& index, int maxDepth, const string& filter) {
+    map<string, vector<string>> graph;
+    stack<pair<string, int>> st;
+    st.push({start, 0});
+
+    while (!st.empty()) {
+        string node = st.top().first;
+        int depth = st.top().second;
+        st.pop();
+
+        if (depth > maxDepth || graph.count(node)) continue;
+
+        vector<string> filteredDeps;
+        if (index.count(node)) {
+            for (const string& dep : index.at(node)) {
+                if (filter.empty() || dep.find(filter) == string::npos) {
+                    filteredDeps.push_back(dep);
+                }
+            }
+        }
+        
+        graph[node] = filteredDeps;
+
+        for (const string& dep : filteredDeps) {
+            if (!graph.count(dep)) {
+                st.push({dep, depth + 1});
+            }
+        }
+    }
+    return graph;
+}
+
+map<string, vector<string>> getReverseDeps(string target, const map<string, vector<string>>& index, int maxDepth) {
+    map<string, vector<string>> revIndex;
+    for (const auto& pair : index) {
+        for (const string& dep : pair.second) {
+            revIndex[dep].push_back(pair.first);
+        }
+    }
+    return dfsIterative(target, revIndex, maxDepth, "");
+}
+
+void printPlantUML(const map<string, vector<string>>& graph) {
+    ofstream out("graph.puml");
+    cout << "\n--- PlantUML ---\n@startuml\n";
+    out << "@startuml\n";
+    for (const auto& pair : graph) {
+        for (const string& dep : pair.second) {
+            cout << "\"" << pair.first << "\" --> \"" << dep << "\"\n";
+            out << "\"" << pair.first << "\" --> \"" << dep << "\"\n";
+        }
+    }
+    cout << "@enduml\n";
+    out << "@enduml\n";
+    out.close();
+    cout << "(Saved to graph.puml)\n";
+}
+
+void printAsciiTree(const map<string, vector<string>>& graph, const string& node, int depth, int maxDepth) {
+    if (depth > maxDepth) return;
+    string indent(depth * 2, ' ');
+    cout << indent << "- " << node << "\n";
+    if (graph.count(node)) {
+        for (const string& dep : graph.at(node)) {
+            printAsciiTree(graph, dep, depth + 1, maxDepth);
+        }
+    }
+}
+
+int main() {
+    Config cfg = loadConfig("config.toml");
+    
+    if (cfg.package.empty() || cfg.max_depth < 1) {
+        cerr << "Invalid config parameters." << endl;
+        return 1;
+    }
+
+    cout << "--- Settings ---" << endl;
+    cout << "package: " << cfg.package << "\nrepo_url: " << cfg.repo_url 
+         << "\ntest_mode: " << (cfg.test_mode ? "true" : "false") 
+         << "\nmax_depth: " << cfg.max_depth << "\n----------------\n";
+
+    map<string, vector<string>> index;
+    if (cfg.test_mode) {
+        index = loadTestRepo(cfg.test_file);
+    } else {
+        index = loadRealRepo(cfg.repo_url);
+    }
+
+    cout << "\n--- Direct Dependencies ---\n";
+    if (index.count(cfg.package)) {
+        for (const auto& d : index[cfg.package]) cout << d << " ";
+        cout << endl;
+    } else {
+        cout << "Package not found." << endl;
+        return 0;
+    }
+
+    cout << "\n--- Graph (DFS Iterative) ---\n";
+    auto graph = dfsIterative(cfg.package, index, cfg.max_depth, cfg.filter_substr);
+    for (const auto& pair : graph) {
+        cout << pair.first << " -> [";
+        for (const auto& d : pair.second) cout << d << " ";
+        cout << "]\n";
+    }
+
+    cout << "\n--- Reverse Dependencies ---\n";
+    auto revGraph = getReverseDeps(cfg.package, index, cfg.max_depth);
+    for (const auto& pair : revGraph) {
+        cout << pair.first << " (depends on " << cfg.package << ")\n";
+    }
+
+    printPlantUML(graph);
+
+    if (cfg.ascii_tree) {
+        cout << "\n--- ASCII Tree ---\n";
+        printAsciiTree(graph, cfg.package, 0, cfg.max_depth);
+    }
+
+    return 0;
+}
+
+
+### tests/test_graph.cpp
+
+#include <iostream>
+#include <cassert>
+#include <map>
+#include <vector>
+#include <string>
+#include <stack>
+
+using namespace std;
+
+map<string, vector<string>> dfsIterative(string start, const map<string, vector<string>>& index, int maxDepth, const string& filter) {
+    map<string, vector<string>> graph;
+    stack<pair<string, int>> st;
+    st.push({start, 0});
+    while (!st.empty()) {
+        string node = st.top().first;
+        int depth = st.top().second;
+        st.pop();
+        if (depth > maxDepth || graph.count(node)) continue;
+        vector<string> filteredDeps;
+        if (index.count(node)) {
+            for (const string& dep : index.at(node)) {
+                if (filter.empty() || dep.find(filter) == string::npos) {
+                    filteredDeps.push_back(dep);
+                }
+            }
+        }
+        graph[node] = filteredDeps;
+        for (const string& dep : filteredDeps) {
+            if (!graph.count(dep)) st.push({dep, depth + 1});
+        }
+    }
+    return graph;
+}
+
+void testBasic() {
+    map<string, vector<string>> index = {{"A", {"B", "C"}}, {"B", {"D"}}, {"C", {}}, {"D", {}}};
+    auto g = dfsIterative("A", index, 2, "");
+    assert(g.count("A") && g.count("B") && g.count("D"));
+}
+
+void testCycle() {
+    map<string, vector<string>> index = {{"P", {"Q"}}, {"Q", {"P"}}};
+    auto g = dfsIterative("P", index, 5, "");
+    assert(g.count("P") && g.count("Q"));
+}
+
+int main() {
+    testBasic();
+    testCycle();
+    cout << "All tests passed." << endl;
+    return 0;
+}
+```
+
+### README.md
+```
+# Dependency Graph Visualizer (Alpine Linux)
+
+## Описание
+Инструмент для построения графа зависимостей пакетов Alpine Linux (apk).
+Реализован обход в глубину (DFS) без рекурсии, поиск обратных зависимостей и визуализация.
+
+## Конфигурация (config.toml)
+- `package` — имя анализируемого пакета
+- `repo_url` — URL репозитория (используется если `test_mode = false`)
+- `test_mode` — использовать локальный файл
+- `test_file` — путь к тестовому файлу
+- `ascii_tree` — вывод в виде ASCII-дерева
+- `max_depth` — максимальная глубина анализа
+- `filter_substr` — подстрока для фильтрации
+
+## Сборка и запуск
+chmod +x run.sh
+./run.sh
+
+## Тесты
+g++ -std=c++17 tests/test_graph.cpp -o build/test_runner && ./build/test_runner
+
